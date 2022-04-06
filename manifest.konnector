@@ -1,0 +1,65 @@
+{
+  "version": "1.0.0",
+  "name": "Palm (via Visions)",
+  "type": "konnector",
+  "language": "node",
+  "icon": "icon.svg",
+  "slug": "palm",
+  "source": "git@github.com:lucst/palm.git",
+  "editor": "Cozy",
+  "vendor_link": "https://www.orientoi.fr/",
+  "categories": ["education"],
+  "fields": {
+    "login": {
+      "type": "text"
+    }
+  },
+  "folders": [{"defaultDir": "$administrative/$konnector/$account"}],
+  "data_types": [
+    "bill"
+  ],
+  "screenshots": [],
+  "permissions": {
+    "files": {
+      "type": "io.cozy.files"
+    },
+    "accounts": {
+      "type": "io.cozy.accounts"
+    },
+    "triggers": {
+      "type": "io.cozy.triggers"
+    }
+  },
+  "developer": {
+    "name": "Cozy Cloud",
+    "url": "https://cozy.io"
+  },
+  "langs": ["fr", "en"],
+  "locales": {
+    "fr": {
+      "short_description": "Récupère vos données Orientoi",
+      "long_description": "Récupère vos données Orientoi",
+      "permissions": {
+        "files": {
+          "description": "Utilisé pour sauvegarder les données sous forme de fichier"
+        },
+        "accounts": {
+          "description": "Utilisé pour obtenir les données du compte"
+        }
+      }
+    },
+    "en": {
+      "short_description": "Fetch your data from Orientoi",
+      "long_description": "Fetch your data from Orientoi",
+      "permissions": {
+        "files": {
+          "description": "Required to save data as file"
+        },
+        "accounts": {
+          "description": "Required to get the account's data"
+        }
+      }
+    }
+  },
+  "manifest_version": "2"
+}
