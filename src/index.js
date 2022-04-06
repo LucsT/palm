@@ -11,7 +11,9 @@ const request = requestFactory({
   json: true
 })
 
-const VENDOR = 'Orientoi'
+const crypto = require('crypto')
+const VENDOR = 'PALM'
+const services = ['inokufu', 'jobready', 'orientoi']
 const baseUrl = 'https://visionstrust.com/v1'
 const serviceKey =
   'SlQ03OMYYo3MAGSdM2UqUuVEGf2Je81N63tUa81D8LgK8CAbxPoSELxmLPtpLGvXdp8ckPAvs6BtuHTeNTjPcoS1SwwumLZjjRd4'
@@ -30,18 +32,23 @@ async function start(fields) {
     const cozyFields = JSON.parse(process.env.COZY_FIELDS || '{}')
     const account = cozyFields.account
     const payload = JSON.parse(process.env.COZY_PAYLOAD || '{}')
+    const options = JSON.parse(process.env.COZY_OPTIONS || '{}')
 
     log('debug', `Payload: ${JSON.stringify(payload)}`)
 
-    if (payload.serviceExportUrl && payload.signedConsent) {
-      log('info', `Start consent import`)
-      const consent = await consentImport(account, payload)
-      log('debug', `Consent: ${JSON.stringify(consent)}`)
+    if (payload.signedConsent && payload.dataImportUrl) {
+      log('info', `Start data export`)
+      const token = generateJWT(serviceKey, secretKey)
+      const validation = await validateExportConsent(payload, token)
+
+      const data = await exportData(fields, payload, email)
+      log('debug', `Export data: ${JSON.stringify(data)}`)
       return
-    } else if (payload.signedConsent && payload.data && payload.user) {
-      log('info', `Start data import`)
-      const data = await importData(fields, payload)
-      log('debug', `Import data: ${JSON.stringify(data)}`)
+    } else if (payload.signedConsent) {
+      log('info', `Start consent export`)
+      const token = generateJWT(serviceKey, secretKey)
+      const consent = await consentExport(account, payload, token)
+      log('debug', `Consent validate: ${JSON.stringify(consent)}`)
       return
     }
 
@@ -56,68 +63,62 @@ async function start(fields) {
     }
     log('info', `user : ${JSON.stringify(user)}`)
 
-    log('info', 'Get purposes')
-    const purposes = await getPurposes(token)
+    log('info', 'Get export purposes')
+    const exportPurposes = await getExportPurposes(token)
+    if (!exportPurposes || exportPurposes.length < 1) {
+      throw new Error('No purpose found')
+    }
+
+    const purposes = exportPurposes.export.find(ele => ele.service === VENDOR)
     if (!purposes || purposes.length < 1) {
       throw new Error('No purpose found')
     }
-    const purposeId = purposes[0].id
+    // Choice between purposes to be done here
 
-    log('info', 'Get import info')
-    const popup = await popupImport(token, {
+    const purposeId = purposes.purposes[0].id
+
+    log('info', 'Get export infos')
+    const popup = await popupExport(token, {
       purpose: purposeId,
-      emailImport: email
+      emailExport: email
     })
+    const serviceId = popup.serviceImportId
 
-    const datatypes = popup.datatypes
-      .filter(type => type.serviceExport === VENDOR)
-      .map(type => {
+
+    const datatypes = popup.datatypes.map(type => {
         return { ...type, checked: true }
       })
     if (!datatypes || datatypes.length < 1) {
       throw new Error('No datatype')
     }
 
-    const emailExport = popup.emailsExport.find(type => type.service === VENDOR)
-    if (!emailExport) {
-      throw new Error('No email export')
-    }
-
     const webhook = await getOrCreateWebhook(fields, account)
-    const importUrl = webhook.links.webhook
-    log('debug', `Webhook available on ${importUrl}`)
+    const webhookUrl = webhook.links.webhook
+    log('debug', `Webhook available on ${webhookUrl}`)
 
-    const service = popup.exportServices.find(
-      service => service.serviceName === VENDOR
-    )
-    if (!service) {
-      throw new Error('No service found matching ', VENDOR)
-    }
-    const serviceId = service.serviceId
-
-    const hasImportEndpoint = user.endpoints.dataImport.find(item => {
-      return item.serviceId === serviceId && item.url === importUrl
+    const hasExportEndpoint = user.endpoints.dataExport.find(item => {
+            return item.serviceId === serviceId && item.url === webhookUrl
     })
-    const hasConsentEndpoint = user.endpoints.consentImport.find(item => {
-      return item.serviceId === serviceId && item.url === importUrl
+    const hasConsentExportEndpoint = user.endpoints.dataExport.find(item => {
+            return item.serviceId === serviceId && item.url === webhookUrl
     })
 
-    if (!hasImportEndpoint || !hasConsentEndpoint) {
+    if (!hasExportEndpoint || !hasConsentExportEndpoint) {
       await updateUserEndpointForService(token, {
         user,
         serviceId,
-        url: importUrl
+        url: webhookUrl
       })
     }
 
-    log('info', 'Create import consent')
-    const consent = await createConsent(token, {
+    log('info', 'Create export consent')
+    const consent = await createExportConsent(token, {
       datatypes,
-      emailImport: user.email,
-      emailExport: emailExport.email,
-      serviceExport: VENDOR,
+      emailImport: popup.emailImport,
+      emailExport: user.email,
       purpose: purposeId,
-      userKey: user.userKey
+      userKey: user.userKey,
+      isNewAccount: false
     })
     log('debug', `Consent: ${JSON.stringify(consent)}`)
     log('info', 'Done!')
@@ -143,6 +144,7 @@ const getFolderId = async path => {
   const file = await client.collection('io.cozy.files').statByPath(path)
   return file.data._id
 }
+
 
 const getOrCreateWebhook = async (fields, accountId) => {
   const accountWebhook = await getAccountWebhook(accountId)
@@ -197,25 +199,25 @@ const updateUserEndpointForService = async (token, params) => {
   }
 
   const newEndpoints = { ...user.endpoints }
-  const existingDataImport = newEndpoints.dataImport.find(
+  const existingDataExport = newEndpoints.dataExport.find(
     item => item.serviceId === serviceId
   )
-  if (existingDataImport) {
-    existingDataImport.url = url
+  if (existingDataExport) {
+    existingDataExport.url = url
   } else {
-    newEndpoints.dataImport.push({
+    newEndpoints.dataExport.push({
       serviceId,
       url
     })
   }
 
-  const existingConsentImport = newEndpoints.consentImport.find(
+  const existingConsentExport = newEndpoints.consentExport.find(
     item => item.serviceId === serviceId
   )
-  if (existingConsentImport) {
-    existingConsentImport.url = url
+  if (existingConsentExport) {
+    existingConsentExport.url = url
   } else {
-    newEndpoints.consentImport.push({
+    newEndpoints.consentExport.push({
       serviceId,
       url
     })
@@ -238,6 +240,14 @@ const getPurposes = async token => {
   })
 }
 
+const getExportPurposes = async token => {
+  return request.get(`${baseUrl}/popups`, {
+    auth: {
+      bearer: token
+    }
+  })
+}
+
 const popupImport = async (token, params) => {
   const { purpose, emailImport } = params
   if (!purpose || !emailImport) {
@@ -245,6 +255,19 @@ const popupImport = async (token, params) => {
   }
   return request.post(`${baseUrl}/popups/import`, {
     body: { purpose, emailImport },
+    auth: {
+      bearer: token
+    }
+  })
+}
+
+const popupExport = async (token, params) => {
+  const { purpose, emailExport } = params
+  if (!purpose || !emailExport) {
+    throw new Error('Missing parameters')
+  }
+  return request.post(`${baseUrl}/popups/export`, {
+    body: { purpose, emailExport },
     auth: {
       bearer: token
     }
@@ -270,6 +293,25 @@ const createConsent = async (token, params) => {
   })
 }
 
+const createExportConsent = async (token, params) => {
+  if (
+    !params.datatypes ||
+    !params.emailImport ||
+    !params.emailExport ||
+    !params.purpose ||
+    !params.userKey
+  ) {
+    throw new Error('Missing parameters')
+  }
+  return request.post(`${baseUrl}/consents/exchange/export`, {
+    body: params,
+    auth: {
+      bearer: token
+    }
+  })
+}
+
+
 const consentImport = async (accountId, params) => {
   const { serviceExportUrl, signedConsent } = params
   if (!serviceExportUrl || !signedConsent) {
@@ -281,6 +323,50 @@ const consentImport = async (accountId, params) => {
     body: {
       signedConsent,
       dataImportUrl
+    }
+  })
+}
+
+const decryptConsent = (signedConsent) => {
+  const publicKeyStg = `-----BEGIN PUBLIC KEY-----
+MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAs7c5/FFH8/52qhFoWXMS
+zesJOCkPTB6381lRka7Egs+MQtTmcy0T+ipIpN7yWrUH2/vTcbRketbe/KdB7OEc
+c6wfkH1lqPWH0BqszyKGDTO5HI+tbTcHX737FbV+X+xdx4vq7opQ65+eZ09zfagy
+m5VUJiDinXlHfeAKkG2QjWR2yrjA4euIYZRaq1cj+zVHeTnHUtI/P8ANt4VGcWT7
+M6HmLbrH12Ueglvv7VfSbhkjGeEYeoopXCEz2eZyOLafRSssh6YWEpaPB3G8BZRS
+wCMbUajSnoUC+626AjLvXNt39wsWYCbQNtR3Zp09WtXL5arY4jJisPYxe+VWRUNb
+9NYHVb1FuMFr8jCxdb0czISaRm9PKCW88Kv6qt6PC7Kzxc+kIGwf9H8nvBBxJYuU
+49LRPHyEz+Di8DfsZuVCy1pkVheHwTQWycoi8jD86Rghj1vg9BYhW7n9BqQLLvxb
+iF/QYTuxFaPz4YjXpfsgjx3hr30cJuSmSn2AeBgl5+e5W7qGqS8Hw9/JqCmF+0Y2
+G3QLwnuaN6Ha9rTmB88HERP4OULmBNYpD+CTEdE/tglFuJYB9HrglmkXA8QK6taP
+wJP5watrK2izg2w6/WFbY0mDEh6Q9hZ0ZDqBZGPuU0bIlLPCn695gVM8/420YeJZ
+Gzl0WoFWTSg+E+vu9GeX55sCAwEAAQ==
+-----END PUBLIC KEY-----`
+
+  const publicKey = crypto.createPublicKey(publicKeyStg)
+  let decryptedData = crypto.publicDecrypt(
+    {
+      key: publicKey,
+      padding: crypto.constants.RSA_PKCS1_PADDING,
+    },
+    Buffer.from(signedConsent,'base64')
+  )
+
+  return JSON.parse(decryptedData.toString())
+}
+
+
+const consentExport = async (accountId, payload, token) => {
+
+  const decryptedData = decryptConsent(payload.signedConsent)
+  const consentId = decryptedData.consentId
+  log('debug', `Exctrated consentId ${consentId}`)
+
+  const tokenVisions = 'temporarytoken'
+  return request.post(`${baseUrl}/consents/exchange/token`, {
+    body: { consentId, token: tokenVisions },
+    auth: {
+      bearer: token
     }
   })
 }
@@ -299,6 +385,53 @@ const importData = async (fields, params) => {
     shouldReplaceFile: () => true
   }
   return saveFiles([file], fields, { contentType: 'text/markdown' })
+}
+
+const validateExportConsent = async (payload, token) => {
+  const decryptedData = decryptConsent(payload.signedConsent)
+  const consentId = decryptedData.consentId
+  log('debug', `Exctrated consentId ${consentId}`)
+
+  return request.post(`${baseUrl}/consents/exchange/validate`, {
+    body: { consentId },
+    auth: {
+      bearer: token
+    }
+  })
+}
+
+const exportData = async (fields, payload, email) => {
+  let data = {}
+  for (const service of services) {
+    log('debug', `Exporting data for ${service}`)
+    const { Q } = require('cozy-client')
+    const files =  await client.query(Q('io.cozy.files')
+                                      .where(
+                                        {cozyMetadata: {createdByApp: service}}
+                                      ).indexFields(['cozyMetadata.createdByApp'])
+                                     )
+    if (files.data.length < 1) {
+      log('debug', `No data found for service ${service}`)
+      continue
+    }
+    const fileId = files.data[0].id
+    const fileContent = await client.collection('io.cozy.files').fetchFileContentById(fileId)
+    let content = await fileContent.text()
+    // Remove ```json in first line
+    content = content.replace(/^```json\n/,'')
+    // Remove last line ```
+    content = content.replace(/\n```$/,'')
+    // Parsing object or array to JSON
+    data[service] = JSON.parse(content)
+  }
+
+  log('debug', `Sending data to ${payload.dataImportUrl}`)
+  return request.post(payload.dataImportUrl, {
+    body: { data,
+            signedConsent: payload.signedConsent,
+            email : email
+          }
+    })
 }
 
 const generateJWT = (serviceKey, secretKey) => {
