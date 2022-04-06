@@ -5,7 +5,7 @@
   "language": "node",
   "icon": "icon.svg",
   "slug": "palm",
-  "source": "git@github.com:lucst/palm.git",
+  "source": "git@github.com:LucsT/palm.git",
   "editor": "Cozy",
   "vendor_link": "https://www.orientoi.fr/",
   "categories": ["education"],
